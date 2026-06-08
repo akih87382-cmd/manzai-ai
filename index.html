@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>漫才ネタ学習・生成アプリ</title>
+<style>
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,"Hiragino Kaku Gothic ProN","Noto Sans JP",sans-serif;margin:16px;background:#f7f7fb;color:#111}
+  .row{display:flex;gap:12px;flex-wrap:wrap}
+  .col{flex:1 1 320px;min-width:280px;background:#fff;padding:12px;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,0.06)}
+  textarea{width:100%;height:160px;padding:8px;border:1px solid #ddd;border-radius:6px;resize:vertical}
+  input[type="text"], input[type="password"]{width:100%;padding:8px;border:1px solid #ddd;border-radius:6px}
+  button{padding:8px 12px;border-radius:6px;border:0;background:#0b63d6;color:#fff;cursor:pointer}
+  .log{white-space:pre-wrap;background:#0f1724;color:#e6eef8;padding:10px;border-radius:6px;max-height:420px;overflow:auto;font-family:monospace;font-size:13px}
+  small.note{display:block;color:#6b7280;margin-top:6px}
+  .muted{color:#6b7280;font-size:13px}
+  .row-top{align-items:center;gap:8px}
+</style>
+</head>
+<body>
+  <h3>漫才ネタ学習・生成アプリ</h3>
+
+  <div class="row">
+    <div class="col">
+      <label>トランスクリプト</label>
+      <textarea id="transcript" placeholder="漫才の書き起こしを貼ってください"></textarea>
+
+      <label style="margin-top:8px">補足メモ（任意）</label>
+      <textarea id="notes" placeholder="芸風や注意点など"></textarea>
+
+      <label style="margin-top:8px">API キー</label>
+      <input id="apiKey" type="password" placeholder="ここに API キーを保存します" />
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button id="saveKey">API キーを保存</button>
+        <button id="clearKey" style="background:#ef4444">API キーを削除</button>
+      </div>
+      <small class="note">**注意**: ブラウザに API キーを置くと漏洩リスクがあります。可能ならサーバー側プロキシを使ってください。</small>
+    </div>
+
+    <div class="col">
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button id="analyzeBtn">解析</button>
+        <button id="generateBtn">似たボケ生成</button>
+        <button id="scriptBtn">台本作成</button>
+        <button id="clearLog">ログクリア</button>
+      </div>
+
+      <label style="margin-top:10px">ログ（最新が上）</label>
+      <div id="log" class="log"></div>
+      <div style="margin-top:8px">
+        <button id="downloadLog" style="background:#10b981">ログをダウンロード</button>
+        <span class="muted" id="storageInfo"></span>
+      </div>
+    </div>
+  </div>
+
+<script>
+/* 設定 */
+const STORAGE_KEY_API = 'genai_api_key_v1';
+const STORAGE_KEY_LOGS = 'genai_logs_v1';
+const DEFAULT_MODEL = 'gemini-3.1-flash-lite';
+const API_ENDPOINT = 'https://generativeai.googleapis.com/v1beta2/models/' + DEFAULT_MODEL + ':generate';
+
+/* UI 要素 */
+const logEl = document.getElementById('log');
+const apiKeyInput = document.getElementById('apiKey');
+const storageInfoEl = document.getElementById('storageInfo');
+
+/* ログ管理 */
+function now(){ return new Date().toLocaleString(); }
+function pushLog(text){
+  const entry = `[${now()}] ${text}`;
+  // 表示
+  logEl.textContent = entry + "\n\n" + logEl.textContent;
+  // 保存
+  try {
+    const logs = JSON.parse(localStorage.getItem(STORAGE_KEY_LOGS) || '[]');
+    logs.unshift({ts: new Date().toISOString(), text});
+    // 上限 200 件に制限
+    if (logs.length > 200) logs.length = 200;
+    localStorage.setItem(STORAGE_KEY_LOGS, JSON.stringify(logs));
+    updateStorageInfo();
+  } catch(e){
+    console.error('ログ保存失敗', e);
+  }
+}
+function loadLogsToUI(){
+  logEl.textContent = '';
+  const logs = JSON.parse(localStorage.getItem(STORAGE_KEY_LOGS) || '[]');
+  for (let i = 0; i < logs.length; i++){
+    const l = logs[i];
+    logEl.textContent += `[${new Date(l.ts).toLocaleString()}] ${l.text}\n\n`;
+  }
+}
+function clearLogs(){
+  localStorage.removeItem(STORAGE_KEY_LOGS);
+  logEl.textContent = '';
+  updateStorageInfo();
+}
+
+/* API キー管理 */
+function saveApiKey(){
+  const v = apiKeyInput.value.trim();
+  if (!v){ pushLog('API キーが空です。保存を中止しました。'); return; }
+  localStorage.setItem(STORAGE_KEY_API, v);
+  pushLog('API キーを localStorage に保存しました。');
+  updateStorageInfo();
+}
+function loadApiKey(){
+  const v = localStorage.getItem(STORAGE_KEY_API) || '';
+  apiKeyInput.value = v;
+  updateStorageInfo();
+}
+function clearApiKey(){
+  localStorage.removeItem(STORAGE_KEY_API);
+  apiKeyInput.value = '';
+  pushLog('API キーを localStorage から削除しました。');
+  updateStorageInfo();
+}
+function updateStorageInfo(){
+  const hasKey = !!localStorage.getItem(STORAGE_KEY_API);
+  const logs = JSON.parse(localStorage.getItem(STORAGE_KEY_LOGS) || '[]');
+  storageInfoEl.textContent = `保存: APIキー ${hasKey ? 'あり' : 'なし'} ・ ログ ${logs.length} 件`;
+}
+
+/* fetch with timeout */
+function fetchWithTimeout(url, options={}, timeout=30000){
+  const controller = new AbortController();
+  const id = setTimeout(()=>controller.abort(), timeout);
+  const merged = {...options, signal: controller.signal};
+  return fetch(url, merged).finally(()=>clearTimeout(id));
+}
+
+/* プロンプト作成 */
+function buildPrompt(task, text, notes){
+  const header = "あなたは日本語で漫才の構造解析とネタ生成を行うアシスタントです。出力は日本語で。著作権のある原文はそのまま転載しないでください。";
+  const tasks = {
+    analyze: "目的: 与えられた漫才書き起こしから面白さの要素を抽出してください。出力は箇条書きで。",
+    generate: "目的: 与えられたネタの形式を真似て短いボケを10個生成してください。出力は番号付きで。",
+    script: "目的: 与えられた素材から3分程度の漫才台本を作成してください。タイトル・登場人物・台本を含めること。"
+  };
+  return `${header}\n---\n【入力】\n${text || '（なし）'}\n【補足】\n${notes || '（なし）'}\n---\nタスク:\n${tasks[task]}\n注意: 出力は日本語で。`;
+}
+
+/* サービス呼び出し（API キー必須） */
+async function callService(prompt, opts = {}){
+  const apiKey = localStorage.getItem(STORAGE_KEY_API) || '';
+  if (!apiKey) throw new Error('API キーが保存されていません。先に「API キーを保存」してください。');
+
+  pushLog('API へ送信: ' + API_ENDPOINT);
+  const body = {
+    prompt: { text: prompt },
+    temperature: opts.temperature ?? 0.8,
+    maxOutputTokens: opts.maxOutputTokens ?? 800
+  };
+
+  try {
+    const res = await fetchWithTimeout(API_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + apiKey
+      },
+      body: JSON.stringify(body)
+    }, 30000);
+
+    pushLog(`HTTP ${res.status} ${res.statusText}`);
+    const json = await res.json().catch(()=>null);
+    if (!res.ok){
+      // エラーメッセージをログに残す
+      const errText = json && json.error ? JSON.stringify(json.error) : await res.text().catch(()=>String(json));
+      throw new Error('API エラー: ' + errText);
+    }
+    return json;
+  } catch (err) {
+    if (err.name === 'AbortError') throw new Error('接続がタイムアウトしました。');
+    throw err;
+  }
+}
+
+/* 応答表示ユーティリティ */
+function displayResponse(res){
+  if (!res) { pushLog('応答が空です。'); return; }
+  // 可能な限り読みやすく表示
+  try {
+    // Google Generative API の場合、応答構造は様々なので柔軟に処理
+    if (res.candidates && Array.isArray(res.candidates)){
+      const texts = res.candidates.map(c => c.output || c.content || JSON.stringify(c)).join('\n\n---\n\n');
+      pushLog('応答受信:\n' + texts);
+      return;
+    }
+    if (res.output && typeof res.output === 'string'){
+      pushLog('応答受信:\n' + res.output);
+      return;
+    }
+    // fallback
+    pushLog('応答受信:\n' + JSON.stringify(res, null, 2));
+  } catch(e){
+    pushLog('応答の表示に失敗しました: ' + String(e));
+  }
+}
+
+/* UI ハンドラ */
+document.getElementById('saveKey').addEventListener('click', saveApiKey);
+document.getElementById('clearKey').addEventListener('click', clearApiKey);
+document.getElementById('clearLog').addEventListener('click', ()=>{ clearLogs(); pushLog('ログをクリアしました。'); });
+document.getElementById('downloadLog').addEventListener('click', ()=>{
+  const logs = localStorage.getItem(STORAGE_KEY_LOGS) || '[]';
+  const blob = new Blob([logs], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'genai_logs.json';
+  a.click();
+  URL.revokeObjectURL(url);
+});
+
+/* 主要ボタン */
+async function handleTask(task){
+  const text = document.getElementById('transcript').value.trim();
+  const notes = document.getElementById('notes').value.trim();
+  const prompt = buildPrompt(task, text, notes);
+  pushLog(`${task} リクエストを送信します`);
+  try {
+    const res = await callService(prompt);
+    displayResponse(res);
+  } catch (err) {
+    pushLog('エラー: ' + (err.message || String(err)));
+    // CORS の可能性が高い場合のヒント
+    if (err.message && err.message.toLowerCase().includes('cors')){
+      pushLog('ヒント: ブラウザから直接呼ぶと CORS によりブロックされることがあります。可能ならサーバー側プロキシを検討してください。');
+    }
+  }
+}
+
+document.getElementById('analyzeBtn').addEventListener('click', ()=>handleTask('analyze'));
+document.getElementById('generateBtn').addEventListener('click', ()=>handleTask('generate'));
+document.getElementById('scriptBtn').addEventListener('click', ()=>handleTask('script'));
+
+/* 起動時処理 */
+loadApiKey();
+loadLogsToUI();
+pushLog('クライアント起動。API キーを保存してから操作してください。');
+</script>
+</body>
+</html>
