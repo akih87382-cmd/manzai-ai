@@ -140,12 +140,13 @@ function buildPrompt(task, text, notes){
   return `${header}\n---\n【入力】\n${text || '（なし）'}\n【補足】\n${notes || '（なし）'}\n---\nタスク:\n${tasks[task]}\n注意: 出力は日本語で。`;
 }
 
-/* REST 呼び出し（x-goog-api-key ヘッダを使用） */
+/* REST 呼び出し（generationConfig 修正版） */
 async function callService(prompt, opts = {}){
   const apiKey = localStorage.getItem(STORAGE_KEY_API) || '';
   if (!apiKey) throw new Error('API キーが保存されていません。先に「API キーを保存」してください。');
 
   pushLog('API へ送信: ' + API_ENDPOINT);
+
   const body = {
     contents: [
       {
@@ -155,8 +156,10 @@ async function callService(prompt, opts = {}){
         ]
       }
     ],
-    temperature: opts.temperature ?? 0.8,
-    maxOutputTokens: opts.maxOutputTokens ?? 800
+    generationConfig: {
+      temperature: opts.temperature ?? 0.8,
+      maxOutputTokens: opts.maxOutputTokens ?? 800
+    }
   };
 
   try {
@@ -179,16 +182,14 @@ async function callService(prompt, opts = {}){
     return json;
   } catch (err) {
     if (err.name === 'AbortError') throw new Error('接続がタイムアウトしました。');
-    // fetch が CORS で失敗すると TypeError: Failed to fetch になることが多い
     throw err;
   }
 }
 
-/* 応答表示ユーティリティ */
+/* 応答表示 */
 function displayResponse(res){
   if (!res) { pushLog('応答が空です。'); return; }
   try {
-    // 標準レスポンス: candidates -> content -> parts -> text
     if (res.candidates && Array.isArray(res.candidates) && res.candidates.length){
       const texts = res.candidates.map(c => {
         try {
@@ -204,8 +205,6 @@ function displayResponse(res){
       pushLog('応答受信:\n' + texts);
       return;
     }
-
-    // 別の構造の場合はそのまま表示
     pushLog('応答受信（未解析）:\n' + JSON.stringify(res, null, 2));
   } catch(e){
     pushLog('応答の表示に失敗しました: ' + String(e));
@@ -237,7 +236,6 @@ async function handleTask(task){
     const res = await callService(prompt);
     displayResponse(res);
   } catch (err) {
-    // fetch の TypeError は CORS やネットワークの可能性が高い
     pushLog('エラー: ' + (err.message || String(err)));
     if (err.message && err.message.toLowerCase().includes('failed to fetch')){
       pushLog('ヒント: ブラウザから直接呼ぶと CORS によりブロックされることがあります。可能ならサーバー側プロキシを検討してください。');
